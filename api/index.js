@@ -1,57 +1,80 @@
-const axios = require('axios');
+const https = require('https');
+const { parse } = require('url');
 
-// Target URL (Hardcoded jaisa tune manga tha)
 const TARGET_URL = "https://stream26.y2ksolution.com/quality-education/2025/01/7957.240-33824.mp4";
 
-module.exports = async (req, res) => {
-    // 1. Browser se 'Range' header uthao (Seek karne ke liye zaroori hai)
-    const range = req.headers.range;
+module.exports = (req, res) => {
+    // 1. CORS Handle karo (Zaroori hai)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Range');
+    
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
 
-    try {
-        // 2. Request options set karo (Spoofing Headers)
-        const options = {
-            method: 'GET',
-            url: TARGET_URL,
-            responseType: 'stream', // Zaroori: Stream mode on
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://y2ksolution.com/', // Server ko fool banane ke liye
-                'Accept': '*/*',
-            }
-        };
+    // 2. Target URL parse karo
+    const targetUrlParams = parse(TARGET_URL);
 
-        // Agar browser ne range mangi hai, toh server se wahi range mango
-        if (range) {
-            options.headers['Range'] = range;
+    // 3. Request Options (Browser ko poora copy karenge)
+    const options = {
+        hostname: targetUrlParams.hostname,
+        path: targetUrlParams.path,
+        method: 'GET',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Encoding': 'identity;q=1, *;q=0',
+            'Connection': 'keep-alive',
+            // IMPORTANT: Agar ye Referer galat hai toh video nahi chalegi.
+            // Jis website par ye video originally hai, uska link yaha daalna padega.
+            // Abhi ke liye main root domain try kar raha hu.
+            'Referer': 'https://stream26.y2ksolution.com/', 
+            'Origin': 'https://stream26.y2ksolution.com'
+        }
+    };
+
+    // Range Header forward karna sabse zaroori hai
+    if (req.headers.range) {
+        options.headers['Range'] = req.headers.range;
+    }
+
+    // 4. Request bhejo
+    const proxyReq = https.request(options, (proxyRes) => {
+        
+        // Agar Target ne error diya (Example: 403 Forbidden)
+        if (proxyRes.statusCode >= 400) {
+            console.error(`Target Error: ${proxyRes.statusCode}`);
+            // Frontend ko batao ki error aaya
+            return res.status(proxyRes.statusCode).send(`Target Blocked Request: ${proxyRes.statusCode}`);
         }
 
-        // 3. Target Server se data fetch karo
-        const response = await axios(options);
-
-        // 4. Target ke response headers copy karo (Content-Type, Length, Range etc.)
-        // Ye bohot zaroori hai taaki player ko pata chale video kitni badi hai
-        const headersToRelay = [
-            'content-type',
+        // Headers Forward karo
+        const headersToCopy = [
             'content-length',
+            'content-type',
             'content-range',
             'accept-ranges',
-            'last-modified'
+            'last-modified',
+            'etag'
         ];
 
-        headersToRelay.forEach(header => {
-            if (response.headers[header]) {
-                res.setHeader(header, response.headers[header]);
+        headersToCopy.forEach(key => {
+            if (proxyRes.headers[key]) {
+                res.setHeader(key, proxyRes.headers[key]);
             }
         });
 
-        // Status code forward karo (200 OK ya 206 Partial Content)
-        res.status(response.status);
+        // Response Code set karo (200 ya 206)
+        res.status(proxyRes.statusCode);
 
-        // 5. Data ko seedha browser ko pipe kar do
-        response.data.pipe(res);
+        // Data Stream karo (Pipe)
+        proxyRes.pipe(res);
+    });
 
-    } catch (error) {
-        console.error('Proxy Error:', error.message);
-        res.status(500).send('Error streaming video');
-    }
+    proxyReq.on('error', (e) => {
+        console.error('Proxy Request Error:', e);
+        res.status(500).send('Internal Proxy Error');
+    });
+
+    proxyReq.end();
 };
